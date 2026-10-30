@@ -13,6 +13,7 @@
  */
 
 (() => {
+  const VERSION = "1.2.0";
   const SCREEN_IMAGE_SELECTOR = 'img[data-sentry-component="CdnImg"], img[srcset]';
   const MIN_CANDIDATE_WIDTH = 700;
   const SCREEN_LINK_PATTERN = /\/explore\/(?:screens|flows)\//;
@@ -185,17 +186,34 @@
       return null;
     }
 
-    return base + screenUrl.slice(index + marker.length);
+    // The `base` already points at `/image/mobbin.com/prod/`, so `content/`
+    // must be kept. Dropping it yields `/prod/app_screens/...`, which is a 502.
+    return base + screenUrl.slice(index + 1);
   }
 
   function getScreenId(img) {
     const link = img.closest("a[href]");
-    if (!link) {
-      return null;
+    if (link) {
+      const match = (link.getAttribute("href") || "").match(SCREEN_ID_PATTERN);
+      if (match) {
+        return match[1];
+      }
     }
 
-    const match = (link.getAttribute("href") || "").match(SCREEN_ID_PATTERN);
-    return match ? match[1] : null;
+    // Detail pages render the main screenshot outside any screen link. Reuse
+    // the page id, but only for images inside a screen frame so unrelated
+    // images (avatars, logos) are never replaced.
+    const inScreenFrame = img.closest(
+      '[class*="mobile-screen-border-radius"], [class*="screen-inset-border"]'
+    );
+    if (inScreenFrame) {
+      const pageMatch = window.location.pathname.match(SCREEN_ID_PATTERN);
+      if (pageMatch) {
+        return pageMatch[1];
+      }
+    }
+
+    return null;
   }
 
   function applyImageUrl(img, url) {
@@ -274,16 +292,22 @@
     const candidateUrl = getLargestCandidateUrl(img);
     const currentUrl = appliedUrl.get(img);
 
+    // The canonical `app_screens/<id>.png` file is the real full-resolution
+    // capture. It is not signed and is never a blurred preview, so prefer it
+    // whenever the page payload exposes it. `applyOriginalFallback` restores
+    // the previous image if a stale path fails to load.
+    if (originalUrl && !failedOriginalUrl.has(img)) {
+      applyOriginalFallback(img, originalUrl);
+      return;
+    }
+
     // A previous run may already have removed `srcset`. Re-apply the URL we
     // picked instead of falling back to the original image.
     const targetUrl = candidateUrl || currentUrl;
 
     if (targetUrl) {
       applyImageUrl(img, targetUrl);
-      return;
     }
-
-    applyOriginalFallback(img, originalUrl);
   }
 
   function observeImage(img) {
@@ -403,6 +427,11 @@
   });
 
   function start() {
+    console.info(
+      "%c[Unblur Mobbin] v" + VERSION + " activo",
+      "color:#22c55e;font-weight:bold"
+    );
+
     refreshScreenUrlMap(true);
     handleModifications();
 

@@ -1,5 +1,10 @@
 /* Neutralize Mobbin's paywall veil without removing React-managed nodes. */
 
+/* Some locked previews are blurred directly on the <img>. */
+img[data-sentry-component="CdnImg"] {
+  filter: none !important;
+}
+
 [class*="backdrop-blur-[8px]"],
 [class*="backdrop-blur-[10px]"],
 [class*="backdrop-blur-[12px]"],
