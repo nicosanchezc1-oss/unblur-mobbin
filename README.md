@@ -14,7 +14,9 @@ This browser extension removes the blur/veil on Mobbin.com screen previews and r
 
 Download the packaged extension from the latest release:
 
-**[UNBLUR-MOBBIN-v1.2-INSTALAR.zip](https://github.com/nicosanchezc1-oss/unblur-mobbin/releases/latest/download/UNBLUR-MOBBIN-v1.2-INSTALAR.zip)**
+**[UNBLUR-MOBBIN-v1.2-INSTALAR.zip](https://github.com/nicosanchezc1-oss/unblur-mobbin/releases/download/v1.2/UNBLUR-MOBBIN-v1.2-INSTALAR.zip)**
+
+Release page: <https://github.com/nicosanchezc1-oss/unblur-mobbin/releases/tag/v1.2>
 
 > Do **not** use GitHub's "Source code (zip)" archive: it only contains the source and has no built extension.
 
