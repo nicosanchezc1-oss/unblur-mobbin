@@ -14,7 +14,7 @@ This browser extension removes the blur/veil on Mobbin.com screen previews and r
 1. **Clone the Repository**
 
    \`\`\`sh
-   gh repo clone bayromest/unblur-mobbin
+   gh repo clone nicosanchezc1-oss/unblur-mobbin
    cd unblur-mobbin
    \`\`\`
 
