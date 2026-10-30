@@ -9,7 +9,21 @@ This browser extension removes the blur/veil on Mobbin.com screen previews and r
 - **Paywall cleanup**: Removes the `pointer-events-none` lock and hides the `backdrop-blur` veil layers and the sticky upgrade banner.
 - **Lazy processing**: Images are upgraded with an `IntersectionObserver` (about 800px around the viewport) so the extension does not download every full-resolution screen at once.
 
-## Installation
+## Install without building (recommended)
+
+Download the packaged extension from the latest release:
+
+**[UNBLUR-MOBBIN-v1.1-INSTALAR.zip](https://github.com/nicosanchezc1-oss/unblur-mobbin/releases/latest/download/UNBLUR-MOBBIN-v1.1-INSTALAR.zip)**
+
+> Do **not** use GitHub's "Source code (zip)" archive: it only contains the source and has no built extension.
+
+1. Unzip the download.
+2. Open `chrome://extensions/` (Edge: `edge://extensions/`, Brave: `brave://extensions/`).
+3. Enable **Developer mode**.
+4. Click **Load unpacked** and select the `unblur-mobbin-v1.1` folder (the one containing `manifest.json`).
+5. Open Mobbin and reload the page.
+
+## Build from source
 
 1. **Clone the Repository**
 
