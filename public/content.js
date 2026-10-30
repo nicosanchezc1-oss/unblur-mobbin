@@ -1,162 +1,435 @@
-function handleModifications() {
-  // Remove promotional banners
-  removePromoBanners();
+/*
+ * Unblur Mobbin content script.
+ *
+ * Mobbin now serves screen previews through signed Bytescale URLs. The URL in
+ * `src` is a small preview, but the `srcset` still contains the larger
+ * candidates (360w / 720w / 1920w). The 1920w candidate is the full-resolution
+ * screen, so the fix is to pin every screen image to that candidate and drop
+ * `srcset`/`sizes` so the browser cannot switch back to the thumbnail.
+ *
+ * When the page also exposes the original Supabase `screenUrl` for a screen,
+ * it is used as a fallback (through the equivalent public Bytescale path) in
+ * case the largest `srcset` candidate is still a low-resolution preview.
+ */
 
-  // Unblur screen cells (grid view)
-  unblurScreenCells();
+(() => {
+  const SCREEN_IMAGE_SELECTOR = 'img[data-sentry-component="CdnImg"], img[srcset]';
+  const MIN_CANDIDATE_WIDTH = 700;
+  const SCREEN_LINK_PATTERN = /\/explore\/(?:screens|flows)\//;
+  const SCREEN_ID_PATTERN = /\/explore\/screens\/([0-9a-f-]{36})/i;
 
-  // Unblur flow cells (flow view)
-  unblurFlowCells();
-}
+  const appliedUrl = new WeakMap();
+  const visibleImages = new WeakMap();
+  const failedOriginalUrl = new WeakSet();
+  const screenUrlMap = new Map();
 
-function removePromoBanners() {
-  // Remove sticky "Get Pro" promotional banners
-  const promoBanners = document.querySelectorAll("aside.sticky.z-10.my-32");
-  promoBanners.forEach((banner) => {
-    banner.remove();
-    console.log("Removed promo banner");
-  });
-}
+  let bytescaleBase = null;
+  let lastMapRefresh = 0;
+  let scheduled = false;
 
-function unblurScreenCells() {
-  // Find blurred screen containers - they have pointer-events-none and the blur overlay
-  const blurredContainers = document.querySelectorAll(
-    ".mobile-screen-border-radius-container.pointer-events-none"
-  );
+  const screenUrlPatterns = [
+    /\\"id\\":\\"([0-9a-f-]{36})\\",\\"screenUrl\\":\\"(https:[^\\"]+)\\"/g,
+    /"id":"([0-9a-f-]{36})","screenUrl":"(https:[^"]+)"/g,
+  ];
 
-  blurredContainers.forEach((container) => {
-    // Remove pointer-events-none to make it interactive
-    container.classList.remove("pointer-events-none");
+  function schedule() {
+    if (scheduled) return;
+    scheduled = true;
 
-    // Find and remove the blur overlay div
-    const blurOverlay = container.querySelector(
-      'div[class*="backdrop-blur"]'
-    );
-    if (blurOverlay) {
-      blurOverlay.remove();
-      console.log("Removed blur overlay");
-    }
-
-    // Update image to high quality
-    const img = container.querySelector("img");
-    if (img) {
-      img.src = upgradeImageUrl(img.src);
-      console.log("Upgraded image quality");
-    }
-  });
-
-  // Also handle the wrapper div structure for screens
-  const screenWrappers = document.querySelectorAll(".flex.flex-col.gap-y-16");
-  screenWrappers.forEach((wrapper) => {
-    const blurredInner = wrapper.querySelector(
-      ".pointer-events-none.mobile-screen-border-radius-container"
-    );
-    if (blurredInner) {
-      blurredInner.classList.remove("pointer-events-none");
-
-      const blurOverlay = blurredInner.querySelector(
-        'div[class*="backdrop-blur"]'
-      );
-      if (blurOverlay) {
-        blurOverlay.remove();
+    const run = () => {
+      scheduled = false;
+      try {
+        handleModifications();
+      } catch (error) {
+        console.error("Unblur Mobbin:", error);
       }
+    };
 
-      const img = blurredInner.querySelector("img");
-      if (img) {
-        img.src = upgradeImageUrl(img.src);
-      }
+    if (typeof window.requestAnimationFrame === "function") {
+      window.requestAnimationFrame(run);
+    } else {
+      window.setTimeout(run, 50);
     }
-  });
-}
-
-function unblurFlowCells() {
-  // Find flow cell screens with pointer-events-none (blurred ones)
-  const blurredFlows = document.querySelectorAll(
-    'a[data-sentry-component="FlowCellScreen"].pointer-events-none'
-  );
-
-  blurredFlows.forEach((link) => {
-    // Remove pointer-events-none
-    link.classList.remove("pointer-events-none");
-
-    // Fix tabindex
-    link.setAttribute("tabindex", "0");
-
-    // Find and remove the blur overlay
-    const blurOverlay = link.querySelector('div[class*="backdrop-blur"]');
-    if (blurOverlay) {
-      blurOverlay.remove();
-      console.log("Removed flow blur overlay");
-    }
-
-    // Update image to high quality
-    const img = link.querySelector("img");
-    if (img) {
-      img.src = upgradeImageUrl(img.src);
-      console.log("Upgraded flow image quality");
-    }
-  });
-
-  // Also catch any remaining blur overlays in flow containers
-  const flowContainers = document.querySelectorAll('.w-\\[--screen-width\\]');
-  flowContainers.forEach((container) => {
-    const blurOverlay = container.querySelector(
-      'div.absolute[class*="backdrop-blur"]'
-    );
-    if (blurOverlay) {
-      blurOverlay.remove();
-    }
-
-    const link = container.querySelector("a");
-    if (link && link.classList.contains("pointer-events-none")) {
-      link.classList.remove("pointer-events-none");
-      link.setAttribute("tabindex", "0");
-    }
-
-    const img = container.querySelector("img");
-    if (img && img.src.includes("w=15")) {
-      img.src = upgradeImageUrl(img.src);
-    }
-  });
-}
-
-function upgradeImageUrl(src) {
-  try {
-    const url = new URL(src);
-
-    // Upgrade width from 15 to 1920
-    if (url.searchParams.get("w") === "15") {
-      url.searchParams.set("w", "1920");
-    }
-
-    // Fix watermark path - remove the /15 suffix if present
-    const imageParam = url.searchParams.get("image");
-    if (imageParam && imageParam.endsWith("/15")) {
-      url.searchParams.set("image", imageParam.slice(0, -3));
-    }
-
-    return url.toString();
-  } catch (error) {
-    console.error("Failed to upgrade image URL:", error);
-    return src;
   }
-}
-// Add event listeners for scroll and DOMContentLoaded
-window.addEventListener("scroll", handleModifications);
-document.addEventListener("DOMContentLoaded", handleModifications);
 
-// Also run on mutation to catch dynamically loaded content
-const observer = new MutationObserver(() => {
-  handleModifications();
-});
+  function refreshScreenUrlMap(force) {
+    const now = Date.now();
+    if (!force && now - lastMapRefresh < 10000) {
+      return;
+    }
+    lastMapRefresh = now;
 
-observer.observe(document.body, {
-  childList: true,
-  subtree: true,
-});
+    let text = "";
+    try {
+      text = Array.from(document.scripts, (script) => script.textContent || "").join("\n");
+    } catch (error) {
+      return;
+    }
 
-// Optionally, remove the event listener when the page is unloaded
-window.addEventListener("unload", () => {
-  window.removeEventListener("scroll", handleModifications);
-  observer.disconnect();
-});
+    for (const pattern of screenUrlPatterns) {
+      pattern.lastIndex = 0;
+      let match;
+      while ((match = pattern.exec(text)) !== null) {
+        if (!screenUrlMap.has(match[1])) {
+          screenUrlMap.set(match[1], match[2]);
+        }
+      }
+    }
+  }
+
+  function parseSrcset(srcset) {
+    if (!srcset) {
+      return [];
+    }
+
+    const candidates = [];
+    for (const part of srcset.split(",")) {
+      const bits = part.trim().split(/\s+/);
+      const url = bits[0];
+      if (!url || url.startsWith("data:")) {
+        continue;
+      }
+
+      let width = 0;
+      for (let index = 1; index < bits.length; index += 1) {
+        const widthMatch = bits[index].match(/^(\d+)w$/i);
+        if (widthMatch) {
+          width = Number(widthMatch[1]);
+        }
+
+        const densityMatch = bits[index].match(/^([\d.]+)x$/i);
+        if (densityMatch) {
+          width = Math.round(Number(densityMatch[1]) * 1000);
+        }
+      }
+
+      candidates.push({ url, width });
+    }
+
+    return candidates;
+  }
+
+  function toAbsoluteUrl(url) {
+    try {
+      return new URL(url, window.location.href).href;
+    } catch (error) {
+      return url;
+    }
+  }
+
+  function getLargestCandidateUrl(img) {
+    const candidates = parseSrcset(img.getAttribute("srcset"));
+    if (!candidates.length) {
+      return null;
+    }
+
+    let best = candidates[0];
+    for (const candidate of candidates) {
+      if (candidate.width > best.width) {
+        best = candidate;
+      }
+    }
+
+    if (best.width < MIN_CANDIDATE_WIDTH) {
+      return null;
+    }
+
+    return toAbsoluteUrl(best.url);
+  }
+
+  function bytescaleBaseFromUrl(src) {
+    if (!src) {
+      return null;
+    }
+
+    try {
+      const url = new URL(src, window.location.href);
+      if (!url.hostname.endsWith("bytescale.mobbin.com")) {
+        return null;
+      }
+
+      const marker = "/image/mobbin.com/prod/";
+      const index = url.pathname.indexOf(marker);
+      if (index === -1) {
+        return null;
+      }
+
+      return url.origin + url.pathname.slice(0, index + marker.length);
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function detectBytescaleBase() {
+    if (bytescaleBase) {
+      return bytescaleBase;
+    }
+
+    const img = document.querySelector('img[src*="bytescale.mobbin.com"]');
+    if (img) {
+      bytescaleBase = bytescaleBaseFromUrl(img.currentSrc || img.src);
+    }
+
+    return bytescaleBase;
+  }
+
+  function originalUrlFromScreenUrl(screenUrl) {
+    const marker = "/content/";
+    const index = screenUrl.indexOf(marker);
+    if (index === -1) {
+      return null;
+    }
+
+    const base = detectBytescaleBase();
+    if (!base) {
+      return null;
+    }
+
+    return base + screenUrl.slice(index + marker.length);
+  }
+
+  function getScreenId(img) {
+    const link = img.closest("a[href]");
+    if (!link) {
+      return null;
+    }
+
+    const match = (link.getAttribute("href") || "").match(SCREEN_ID_PATTERN);
+    return match ? match[1] : null;
+  }
+
+  function applyImageUrl(img, url) {
+    if (!url) {
+      return false;
+    }
+
+    const alreadyApplied =
+      appliedUrl.get(img) === url &&
+      img.getAttribute("src") === url &&
+      !img.hasAttribute("srcset") &&
+      !img.hasAttribute("sizes");
+
+    if (alreadyApplied) {
+      return false;
+    }
+
+    if (img.hasAttribute("srcset")) {
+      img.removeAttribute("srcset");
+    }
+    if (img.hasAttribute("sizes")) {
+      img.removeAttribute("sizes");
+    }
+    if (img.getAttribute("src") !== url) {
+      img.src = url;
+    }
+
+    appliedUrl.set(img, url);
+    return true;
+  }
+
+  function applyOriginalFallback(img, originalUrl) {
+    if (!originalUrl || failedOriginalUrl.has(img)) {
+      return;
+    }
+
+    const previousSrc = img.getAttribute("src");
+    const previousSrcset = img.getAttribute("srcset");
+    const previousSizes = img.getAttribute("sizes");
+
+    if (!applyImageUrl(img, originalUrl)) {
+      return;
+    }
+
+    const onError = () => {
+      img.removeEventListener("error", onError);
+      failedOriginalUrl.add(img);
+      appliedUrl.delete(img);
+
+      // The original path can be stale for some screens. Put the previous
+      // image back when that happens instead of leaving a broken thumbnail.
+      if (previousSrc === null) {
+        img.removeAttribute("src");
+      } else {
+        img.setAttribute("src", previousSrc);
+      }
+      if (previousSrcset !== null) {
+        img.setAttribute("srcset", previousSrcset);
+      }
+      if (previousSizes !== null) {
+        img.setAttribute("sizes", previousSizes);
+      }
+    };
+
+    img.addEventListener("error", onError, { once: true });
+  }
+
+  function upgradeImage(img) {
+    if (!visibleImages.get(img)) {
+      return;
+    }
+
+    const screenId = getScreenId(img);
+    const screenUrl = screenId ? screenUrlMap.get(screenId) : null;
+    const originalUrl = screenUrl ? originalUrlFromScreenUrl(screenUrl) : null;
+    const candidateUrl = getLargestCandidateUrl(img);
+    const currentUrl = appliedUrl.get(img);
+
+    // A previous run may already have removed `srcset`. Re-apply the URL we
+    // picked instead of falling back to the original image.
+    const targetUrl = candidateUrl || currentUrl;
+
+    if (targetUrl) {
+      applyImageUrl(img, targetUrl);
+      return;
+    }
+
+    applyOriginalFallback(img, originalUrl);
+  }
+
+  function observeImage(img) {
+    if (!visibleImages.has(img)) {
+      visibleImages.set(img, false);
+      intersectionObserver.observe(img);
+    }
+
+    if (visibleImages.get(img)) {
+      upgradeImage(img);
+    }
+  }
+
+  function unlockElement(element) {
+    const isScreenLink = element.matches('a[href*="/explore/screens/"], a[href*="/explore/flows/"]');
+    const containsScreenImage = Boolean(
+      element.querySelector('img[data-sentry-component="CdnImg"]')
+    );
+
+    if (!isScreenLink && !containsScreenImage) {
+      return;
+    }
+
+    element.classList.remove("pointer-events-none");
+
+    if (element.getAttribute("tabindex") === "-1") {
+      element.setAttribute("tabindex", "0");
+    }
+  }
+
+  function hidePaywallOverlays() {
+    const overlays = document.querySelectorAll('[class*="backdrop-blur"]');
+
+    overlays.forEach((element) => {
+      if (element.tagName === "IMG") {
+        return;
+      }
+
+      const className = typeof element.className === "string" ? element.className : "";
+      if (!className.includes("backdrop-blur")) {
+        return;
+      }
+
+      const inScreen = Boolean(
+        element.closest(
+          'a[href*="/explore/screens/"], a[href*="/explore/flows/"], [class*="mobile-screen-border-radius"], [class*="screen-inset-border"]'
+        )
+      );
+      const isKnownPaywallVeil = /backdrop-blur-\[(?:8|10|12)px\]/.test(className);
+      if (!inScreen && !isKnownPaywallVeil) {
+        return;
+      }
+
+      // Never hide a wrapper that contains the screenshot itself.
+      if (element.querySelector('img[data-sentry-component="CdnImg"]')) {
+        return;
+      }
+
+      element.style.setProperty("display", "none", "important");
+    });
+  }
+
+  function handleModifications() {
+    refreshScreenUrlMap(false);
+
+    document.querySelectorAll(SCREEN_IMAGE_SELECTOR).forEach(observeImage);
+
+    document.querySelectorAll(".pointer-events-none").forEach(unlockElement);
+    hidePaywallOverlays();
+  }
+
+  const intersectionObserver = new IntersectionObserver(
+    (entries) => {
+      let shouldSchedule = false;
+
+      entries.forEach((entry) => {
+        visibleImages.set(entry.target, entry.isIntersecting);
+        if (entry.isIntersecting) {
+          shouldSchedule = true;
+        }
+      });
+
+      if (shouldSchedule) {
+        schedule();
+      }
+    },
+    { rootMargin: "800px 0px" }
+  );
+
+  const mutationObserver = new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      if (mutation.type === "childList" && mutation.addedNodes.length) {
+        schedule();
+        return;
+      }
+
+      if (mutation.type === "attributes") {
+        if (mutation.attributeName === "class") {
+          const target = mutation.target;
+          const inScreen =
+            target &&
+            typeof target.closest === "function" &&
+            target.closest(
+              'a[href*="/explore/screens/"], a[href*="/explore/flows/"], [class*="mobile-screen-border-radius"], [class*="screen-inset-border"]'
+            );
+          if (inScreen) {
+            schedule();
+            return;
+          }
+          continue;
+        }
+
+        schedule();
+        return;
+      }
+    }
+  });
+
+  function start() {
+    refreshScreenUrlMap(true);
+    handleModifications();
+
+    mutationObserver.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["src", "srcset", "sizes", "class"],
+    });
+
+    window.addEventListener("scroll", schedule, { passive: true, capture: true });
+    window.addEventListener("resize", schedule, { passive: true });
+    window.addEventListener("popstate", schedule);
+
+    // The Next.js payload can still be streaming when this script starts, so
+    // refresh the original-screen map once more after hydration settles.
+    window.setTimeout(() => {
+      refreshScreenUrlMap(true);
+      schedule();
+    }, 2500);
+
+    schedule();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", start, { once: true });
+  } else {
+    start();
+  }
+})();

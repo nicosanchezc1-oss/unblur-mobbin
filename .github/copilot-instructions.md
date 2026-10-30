@@ -21,31 +21,35 @@ The content script runs independently of the popup. There is **no message passin
 
 ### Content Script DOM Manipulation
 
-The unblur logic in [public/content.js](../public/content.js) targets specific Mobbin elements:
+The unblur logic in [public/content.js](../public/content.js) targets specific Mobbin elements.
 
-**Blurred elements have these markers:**
-- `pointer-events-none` class on container/link
-- Low-quality image URL with `w=15` parameter
-- Blur overlay div: `div[class*="backdrop-blur"]` with `bg-[hsl(var(--neutral-0)/40%)] backdrop-blur-[10px]`
-- Watermark path ending in `/15` (e.g., `image=/mobbin.com/.../uuid/15`)
+**Current lock (2026):** Mobbin serves screen previews through signed Bytescale URLs. The `src` is a small preview, but `srcset` still contains the full-resolution `1920w` candidate. Images may also have `pointer-events-none` and a `backdrop-blur` veil.
 
 **Unblur transformation:**
-1. Remove `pointer-events-none` class
-2. Remove blur overlay div entirely
-3. Upgrade image URL: `w=15` → `w=1920`
-4. Fix watermark: remove `/15` suffix from image param
+1. For every visible screen image, pick the largest `srcset` candidate (at least 700w) and pin it to `src`.
+2. Remove `srcset` and `sizes` so the browser cannot switch back to the thumbnail.
+3. If no large candidate exists, use the original Supabase `screenUrl` exposed in the page payload through its equivalent public Bytescale path.
+4. Remove `pointer-events-none` from screen cards and hide `backdrop-blur-[...]` veil layers.
+5. Re-run on scroll/DOM mutations, but only process images within ~800px of the viewport to avoid downloading every full-resolution screen at once.
+
+CSS overrides live in [public/content.css](../public/content.css) (pseudo-element blurs, locked pointer events, sticky upsell banner).
 
 **Key selectors:**
-- Screen cells: `.mobile-screen-border-radius-container.pointer-events-none`
-- Flow cells: `a[data-sentry-component="FlowCellScreen"].pointer-events-none`
-- Flow containers: `.w-\[--screen-width\]`
+- Screen images: `img[data-sentry-component="CdnImg"]`, `img[srcset]`
+- Screen/flow links: `a[href*="/explore/screens/"]`, `a[href*="/explore/flows/"]`
+- Card wrappers: `[class*="mobile-screen-border-radius"]`, `[class*="screen-inset-border"]`
+- Paywall veil: `[class*="backdrop-blur-[10px]"]`, `[class*="after:backdrop-blur"]`
 
-Event-driven execution with MutationObserver for dynamic content:
+Event-driven execution with rAF-throttled MutationObserver and IntersectionObserver:
 ```javascript
-window.addEventListener("scroll", handleModifications);
-document.addEventListener("DOMContentLoaded", handleModifications);
-const observer = new MutationObserver(() => handleModifications());
-observer.observe(document.body, { childList: true, subtree: true });
+window.addEventListener("scroll", schedule, { passive: true, capture: true });
+const observer = new MutationObserver(schedule);
+observer.observe(document.documentElement, {
+  childList: true,
+  subtree: true,
+  attributes: true,
+  attributeFilter: ["src", "srcset", "sizes", "class"],
+});
 ```
 
 ### Build Output Structure
@@ -79,6 +83,7 @@ npm run lint    # Run ESLint
 | Location | Purpose |
 |----------|---------|
 | `public/content.js` | Content script (vanilla JS, not processed by Vite) |
+| `public/content.css` | CSS overrides for the paywall veil, pointer locks and banner |
 | `public/manifest.json` | Extension manifest (Manifest V3) |
 | `src/` | React popup UI (TypeScript + Tailwind) |
 | `public/icons/` | Extension icons (16, 48, 128px) |

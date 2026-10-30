@@ -1,0 +1,45 @@
+/* Neutralize Mobbin's paywall veil without removing React-managed nodes. */
+
+[class*="backdrop-blur-[8px]"],
+[class*="backdrop-blur-[10px]"],
+[class*="backdrop-blur-[12px]"],
+[class*="bg-[hsl(var(--neutral-0)/40%)]"][class*="backdrop-blur"] {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+/*
+ * Some versions of the paywall draw the blur on a pseudo-element
+ * (`after:backdrop-blur-[10px]`), which is not affected by the rule above.
+ */
+a[href*="/explore/screens/"] [class*="after:backdrop-blur"]::after,
+a[href*="/explore/flows/"] [class*="after:backdrop-blur"]::after,
+a[href*="/explore/screens/"] [class*="before:backdrop-blur"]::before,
+a[href*="/explore/flows/"] [class*="before:backdrop-blur"]::before,
+[class*="after:backdrop-blur-[10px]"]::after,
+[class*="before:backdrop-blur-[10px]"]::before {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  background: none !important;
+}
+
+/* Hide the actual veil layer on locked screen cards. */
+a[href*="/explore/screens/"] [class*="backdrop-blur-[10px]"],
+a[href*="/explore/flows/"] [class*="backdrop-blur-[10px]"],
+[class*="mobile-screen-border-radius"] [class*="backdrop-blur-[10px]"],
+[class*="screen-inset-border"] [class*="backdrop-blur-[10px]"] {
+  display: none !important;
+}
+
+/* Locked cards are rendered with pointer-events disabled. */
+a[href*="/explore/screens/"][class*="pointer-events-none"],
+a[href*="/explore/flows/"][class*="pointer-events-none"],
+a[href*="/explore/screens/"] [class*="pointer-events-none"],
+a[href*="/explore/flows/"] [class*="pointer-events-none"] {
+  pointer-events: auto !important;
+}
+
+/* Hide the sticky upgrade banner. */
+aside.sticky.z-10.my-32 {
+  display: none !important;
+}

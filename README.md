@@ -1,10 +1,13 @@
 # Mobbin Scene Unblur Extension
 
-This browser extension helps you unlock and view the blurred pro scenes on Mobbin.com. It modifies the content of the Mobbin site to reveal detailed visuals that are normally hidden behind a blur.
+This browser extension removes the blur/veil on Mobbin.com screen previews and restores them to their full resolution.
 
 ## Features
 
-- **Unblur Pro Scenes**: Automatically unblurs pro scenes on Mobbin.com for enhanced viewing.
+- **Full-resolution screens**: Mobbin's `src` attribute only holds a small preview, but `srcset` still contains the full-size candidates. The extension pins each visible screen to its largest candidate (`1920w`) and removes `srcset`/`sizes` so the browser cannot fall back to the thumbnail.
+- **Original-image fallback**: When a screen has no large `srcset` candidate, the extension reuses the original `screenUrl` exposed in the page payload through its equivalent public Bytescale path. If that URL is stale, the previous image is restored.
+- **Paywall cleanup**: Removes the `pointer-events-none` lock and hides the `backdrop-blur` veil layers and the sticky upgrade banner.
+- **Lazy processing**: Images are upgraded with an `IntersectionObserver` (about 800px around the viewport) so the extension does not download every full-resolution screen at once.
 
 ## Installation
 
@@ -12,7 +15,7 @@ This browser extension helps you unlock and view the blurred pro scenes on Mobbi
 
    \`\`\`sh
    gh repo clone bayromest/unblur-mobbin
-   cd your-repo-name
+   cd unblur-mobbin
    \`\`\`
 
 2. **Install Dependencies**
@@ -51,14 +54,18 @@ This browser extension helps you unlock and view the blurred pro scenes on Mobbi
 
 ## Usage
 
-Once installed, the extension will automatically detect and unblur pro scenes on Mobbin.com. Simply navigate to the Mobbin site, and the extension will handle the rest.
+Once installed, the extension works automatically on Mobbin.com. Open Mobbin and the screens you see will load at full resolution, without the blur veil or the locked pointer events.
 
-## Configuration
+## How it works
 
-To adjust the settings of the extension:
+Mobbin serves screen previews through signed Bytescale URLs. The `src` attribute is a low-resolution preview, but the `srcset` still lists the larger candidates (`360w`, `720w`, `1920w`). For every screen image near the viewport, `content.js`:
 
-1. Open the extension popup or options page (if available).
-2. Customize settings such as the level of unblurring or visual enhancements.
+1. Picks the largest `srcset` candidate and sets it as `src`.
+2. Removes `srcset` and `sizes`.
+3. Falls back to the original Supabase `screenUrl` (via Bytescale) when no large candidate exists.
+4. Removes `pointer-events-none` and hides the paywall blur layers.
+
+The logic is split across `public/content.js` and `public/content.css`.
 
 ## Contributing
 
