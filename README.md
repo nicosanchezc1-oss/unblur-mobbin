@@ -4,30 +4,30 @@ This browser extension removes the blur/veil on Mobbin.com screen previews and r
 
 ## Features
 
-- **Full-resolution screens**: Mobbin's `src` attribute only holds a small preview, but `srcset` still contains the full-size candidates. The extension pins each visible screen to its largest candidate (`1920w`) and removes `srcset`/`sizes` so the browser cannot fall back to the thumbnail.
-- **Canonical original image**: When the page payload exposes the screen's `screenUrl`, the extension loads the original `app_screens/<id>.png` from Bytescale instead. That file is the real native capture (e.g. 1179×2556) and is never a blurred preview. If the URL is stale, the previous image is restored automatically.
-- **Works on detail pages too**: The original image is also resolved from the URL when the screenshot is not wrapped in a screen link.
-- **Paywall cleanup**: Removes the `pointer-events-none` lock and hides the `backdrop-blur` veil layers and the sticky upgrade banner.
-- **Lazy processing**: Images are upgraded with an `IntersectionObserver` (about 800px around the viewport) so the extension does not download every full-resolution screen at once.
+- **Full-resolution screens**: Mobbin's image URL contains the canonical unsigned asset (`.../content/app_screens/<asset>.png`). Some pages render it with a downscale query (`?w=15`); the extension strips the query and pins the image to the native capture (e.g. 1179×2556) on every route.
+- **Paywall cleanup**: Hides the `backdrop-blur` veil layers (the exact `bg-[hsl(var(--neutral-0)/40%)] backdrop-blur-[10px]` overlay used on locked cells), removes wrapper blur filters and re-enables pointer events.
+- **Works on app detail pages too**: The asset path is resolved directly from the image URL, so it does not depend on the page payload being present in the HTML. When a signed URL is used instead, the extension also reads Mobbin's payload and app screens API.
+- **Lazy processing**: Images are upgraded with an `IntersectionObserver` (about 1200px around the viewport) so the extension does not download every full-resolution screen at once.
 
 ## Install without building (recommended)
 
 Download the packaged extension from the latest release:
 
-**[UNBLUR-MOBBIN-v1.2-INSTALAR.zip](https://github.com/nicosanchezc1-oss/unblur-mobbin/releases/download/v1.2/UNBLUR-MOBBIN-v1.2-INSTALAR.zip)**
+**[UNBLUR-MOBBIN-v1.3-INSTALAR.zip](https://github.com/nicosanchezc1-oss/unblur-mobbin/releases/download/v1.3/UNBLUR-MOBBIN-v1.3-INSTALAR.zip)**
 
-Release page: <https://github.com/nicosanchezc1-oss/unblur-mobbin/releases/tag/v1.2>
+Release page: <https://github.com/nicosanchezc1-oss/unblur-mobbin/releases/tag/v1.3>
 
 > Do **not** use GitHub's "Source code (zip)" archive: it only contains the source and has no built extension.
 
 1. Unzip the download.
 2. Open `chrome://extensions/` (Edge: `edge://extensions/`, Brave: `brave://extensions/`).
 3. Enable **Developer mode**.
-4. Click **Load unpacked** and select the `unblur-mobbin-v1.2` folder (the one containing `manifest.json`).
-5. Open Mobbin and reload the page.
-6. Optional check: open DevTools (F12) and look for `[Unblur Mobbin] v1.2.0 activo` in the Console.
+4. Click **Load unpacked** and select the `unblur-mobbin-v1.3` folder (the one containing `manifest.json`).
+5. Remove any older copy of this extension (and any other "Mobbin Cracker" extension) so two scripts do not fight over the same images.
+6. Open Mobbin and reload the page.
+7. Optional check: open DevTools (F12) and look for `[Unblur Mobbin] v1.3.0 activo` in the Console.
 
-If you still see blur, scroll the page: screens are upgraded only when they get near the viewport. Also remove any previous copy of the extension, then reload it from `chrome://extensions/`.
+If you still see blur, scroll the page: screens are upgraded when they get near the viewport. If a specific page still fails, the console prints an `[Unblur Mobbin] diagnóstico` object with the image URL, decoded size and whether a blur veil was found.
 
 ## Build from source
 
@@ -78,12 +78,12 @@ Once installed, the extension works automatically on Mobbin.com. Open Mobbin and
 
 ## How it works
 
-Mobbin serves screen previews through signed Bytescale URLs. The `src` attribute is a low-resolution preview, but the `srcset` still lists the larger candidates (`360w`, `720w`, `1920w`). For every screen image near the viewport, `content.js`:
+Mobbin serves each screenshot through a `CdnImg` component. The rendered URL either points to the canonical unsigned asset (`/content/app_screens/<asset>.png`) or to a transformed derivative (`?w=15`, `enc=...`). For every screen image near the viewport, `content.js`:
 
-1. Resolves the screen id from its link (or from the page URL on detail pages) and looks up the original `screenUrl` in the page payload.
-2. Loads the canonical `app_screens/<id>.png` from Bytescale when available; otherwise picks the largest `srcset` candidate.
+1. Derives the canonical asset URL from the image itself and drops the transform query.
+2. Falls back to the screen's `screenUrl` from the page payload (and, on app pages, from `/api/app/fetch-app-versions-screens`), then to the largest `srcset` candidate.
 3. Removes `srcset`/`sizes` and restores the previous image if the canonical URL fails.
-4. Removes `pointer-events-none` and hides the paywall blur layers.
+4. Removes `pointer-events-none` and hides the paywall `backdrop-blur` veil layers on every route.
 
 The logic is split across `public/content.js` and `public/content.css`.
 

@@ -1,46 +1,59 @@
 /* Neutralize Mobbin's paywall veil without removing React-managed nodes. */
 
 /* Some locked previews are blurred directly on the <img>. */
-img[data-sentry-component="CdnImg"] {
+img[data-sentry-component="CdnImg"],
+img[data-sentry-source-file="ScreenCellImage.tsx"],
+img[data-sentry-source-file="CdnImg.tsx"] {
   filter: none !important;
 }
 
+/*
+ * Exact veil Mobbin renders on locked screen cells:
+ * <div class="absolute inset-0 bg-[hsl(var(--neutral-0)/40%)] backdrop-blur-[10px]">
+ * It appears on every route (explore, app detail, flows), so this rule is not
+ * scoped to /explore/ links.
+ */
+[class*="backdrop-blur-[6px]"],
 [class*="backdrop-blur-[8px]"],
 [class*="backdrop-blur-[10px]"],
 [class*="backdrop-blur-[12px]"],
-[class*="bg-[hsl(var(--neutral-0)/40%)]"][class*="backdrop-blur"] {
-  -webkit-backdrop-filter: none !important;
-  backdrop-filter: none !important;
+[class*="backdrop-blur-[16px]"],
+[class*="bg-[hsl(var(--neutral-0)/40%)]"] {
+  display: none !important;
+}
+
+/* Screen frames appear as `mobile-screen-border-radius` (mobile) or
+ * `web-screen-border-radius` (web) plus `screen-inset-border`. */
+[class*="screen-border-radius"] [class*="backdrop-blur"],
+[class*="screen-inset-border"] [class*="backdrop-blur"] {
+  display: none !important;
 }
 
 /*
  * Some versions of the paywall draw the blur on a pseudo-element
  * (`after:backdrop-blur-[10px]`), which is not affected by the rule above.
  */
-a[href*="/explore/screens/"] [class*="after:backdrop-blur"]::after,
-a[href*="/explore/flows/"] [class*="after:backdrop-blur"]::after,
-a[href*="/explore/screens/"] [class*="before:backdrop-blur"]::before,
-a[href*="/explore/flows/"] [class*="before:backdrop-blur"]::before,
-[class*="after:backdrop-blur-[10px]"]::after,
-[class*="before:backdrop-blur-[10px]"]::before {
+[class*="after:backdrop-blur"]::after,
+[class*="before:backdrop-blur"]::before {
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
   background: none !important;
-}
-
-/* Hide the actual veil layer on locked screen cards. */
-a[href*="/explore/screens/"] [class*="backdrop-blur-[10px]"],
-a[href*="/explore/flows/"] [class*="backdrop-blur-[10px]"],
-[class*="mobile-screen-border-radius"] [class*="backdrop-blur-[10px]"],
-[class*="screen-inset-border"] [class*="backdrop-blur-[10px]"] {
   display: none !important;
 }
 
+/* A few locked layouts blur the whole wrapper instead of a veil layer. */
+[class*="screen-border-radius"],
+[class*="screen-inset-border"] {
+  filter: none !important;
+}
+
 /* Locked cards are rendered with pointer-events disabled. */
-a[href*="/explore/screens/"][class*="pointer-events-none"],
+[class*="screen-border-radius"][class*="pointer-events-none"],
+[class*="screen-inset-border"][class*="pointer-events-none"],
+a[href*="/screens/"][class*="pointer-events-none"],
 a[href*="/explore/flows/"][class*="pointer-events-none"],
-a[href*="/explore/screens/"] [class*="pointer-events-none"],
-a[href*="/explore/flows/"] [class*="pointer-events-none"] {
+[class*="screen-border-radius"] [class*="pointer-events-none"],
+[class*="screen-inset-border"] [class*="pointer-events-none"] {
   pointer-events: auto !important;
 }
 
