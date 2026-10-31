@@ -1,54 +1,83 @@
 /*
  * Unblur Mobbin content script.
  *
- * Mobbin renders every screen through a `CdnImg` component. The visible `src`
- * can be a downscaled preview (`?w=15`) and locked screens additionally get a
- * `backdrop-blur-[10px]` veil layer on top of the screenshot.
+ * Mobbin renders every screen through a `CdnImg` component. Three different
+ * things can hide the real screenshot:
  *
- * The real asset path is always in the image URL, in the canonical unsigned
- * form `.../content/app_screens/<asset>.png`. Stripping the transform query
- * from that path returns the native capture (e.g. 1179x2556). This works on
- * every route, including app detail pages, because it does not depend on the
- * page payload being present in the HTML.
+ *   1. Unlocked screens on /explore: `...content/app_screens/<asset>.png?w=15`
+ *      (a downscaled transform of the real asset).
+ *   2. Locked screens: `.../prod/file.webp?enc=...`, a signed placeholder whose
+ *      URL does not contain the asset id at all, plus a
+ *      `backdrop-blur-[10px]` veil layer on top.
+ *   3. Some layouts blur the wrapper (`filter: blur(...)`) instead of a veil.
  *
- * This script therefore:
- *   1. hides the paywall veil and re-enables pointer events on screen frames,
- *   2. rewrites screen images to the canonical asset path (no query string),
- *   3. falls back to the screen's `screenUrl` from the page payload, then to
- *      the largest `srcset` candidate,
- *   4. rolls back to the previous image if a replacement fails to load.
+ * The full-resolution asset can still be resolved:
+ *   - the Next.js flight payload maps every screen `id` to a `screenUrl`; when
+ *     the screen is restricted that URL is the signed placeholder, but the
+ *     `screenCdnImgSources` block next to it lists the 1920w rendition,
+ *   - `/api/app/fetch-app-versions-screens` returns the original
+ *     `content/app_screens/<asset>.png` for every screen of the app, including
+ *     the restricted ones.
+ * The original asset is then requested from bytescale WITHOUT a transform
+ * query (`.../prod/content/app_screens/<asset>.png`), which serves the native
+ * capture (e.g. 1179x2556) instead of the 286px preview.
+ *
+ * Strategies per image, in order:
+ *   1. canonical asset path already in the image URL -> drop the query,
+ *   2. signed thumbnail URL -> screen id -> original asset,
+ *   3. screen id from the surrounding link or the current route -> original,
+ *   4. largest `srcset` candidate.
+ * A failed replacement rolls back to the previous image.
  */
 
 (() => {
-  const VERSION = "1.3.0";
-  const SCREEN_IMAGE_SELECTOR =
-    'img[data-sentry-component="CdnImg"], img[data-sentry-source-file="ScreenCellImage.tsx"], img[srcset], img[src*="app_screens"], img[src*="app_fullpage_screens"], img[src*="user_screens"]';
-  const MIN_CANDIDATE_WIDTH = 700;
-  const SCREEN_ID_PATTERN = /\/screens\/([0-9a-f-]{36})/i;
+  const VERSION = "1.4.0";
   const SCREEN_FRAME_SELECTOR =
     '[class*="screen-border-radius"], [class*="screen-inset-border"]';
+  const SCREEN_ANCHOR_SELECTOR =
+    'a[href*="/screens/"], a[href*="/explore/screens/"], a[href*="/explore/flows/"]';
+  const SCREEN_IMAGE_SELECTOR = [
+    'img[data-sentry-component="CdnImg"]',
+    'img[data-sentry-source-file="ScreenCellImage.tsx"]',
+    "img[srcset]",
+    'img[src*="app_screens"]',
+    'img[src*="app_fullpage_screens"]',
+    'img[src*="user_screens"]',
+    'img[src*="file.webp"]',
+  ].join(", ");
   const ASSET_PATH_PATTERN =
     /\/(?:content|public)\/(app_screens|app_fullpage_screens|user_screens)\/[0-9a-f-]{36}\.[a-z0-9]+/i;
+  const SCREEN_ID_PATTERN = /\/screens\/([0-9a-f-]{36})/i;
+  const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+  const MIN_CANDIDATE_WIDTH = 700;
   const DIAGNOSTICS_DELAY = 6000;
+  const BACKSLASH_QUOTE = String.fromCharCode(92) + '"';
+
+  /**
+   * id -> { originalPath, signed, best }
+   * `originalPath` is `content/app_screens/<asset>.png`, `best` is the largest
+   * signed rendition (1920w) used until the API provides the original.
+   */
+  const screenEntries = new Map();
+  /** every URL seen for a screen (thumbnail, srcset renditions) -> screen id */
+  const urlToScreenId = new Map();
 
   const appliedUrl = new WeakMap();
   const visibleImages = new WeakMap();
   const failedUrls = new WeakMap();
-  const screenUrlMap = new Map();
-  const signedUrlToScreenUrl = new Map();
+  const reloadedUrls = new WeakMap();
 
   let bytescaleBase = null;
-  let lastMapRefresh = 0;
+  let lastPayloadSignature = null;
+  let lastPathname = window.location.pathname;
   let appScreensRequested = false;
+  let appScreensAttempts = 0;
   let scheduled = false;
 
-  const screenUrlPatterns = [
-    /\\"id\\":\\"([0-9a-f-]{36})\\",\\"screenUrl\\":\\"(https:[^\\"]+)\\"/g,
-    /"id":"([0-9a-f-]{36})","screenUrl":"(https:[^"]+)"/g,
-  ];
-
   function schedule() {
-    if (scheduled) return;
+    if (scheduled) {
+      return;
+    }
     scheduled = true;
 
     const run = () => {
@@ -67,29 +96,218 @@
     }
   }
 
-  function refreshScreenUrlMap(force) {
-    const now = Date.now();
-    if (!force && now - lastMapRefresh < 10000) {
+  function normalizeUrl(raw) {
+    if (!raw) {
+      return "";
+    }
+    return String(raw).replace(/&amp;/g, "&").trim();
+  }
+
+  function parseJsonish(raw) {
+    if (!raw) {
+      return null;
+    }
+    try {
+      return JSON.parse(raw.split(BACKSLASH_QUOTE).join('"'));
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function assetPathFromUrl(url) {
+    const value = normalizeUrl(url);
+    const match = value.match(ASSET_PATH_PATTERN);
+    return match ? value.slice(match.index + 1) : null;
+  }
+
+  function widthsFromSources(sources) {
+    const list = [];
+    if (!sources) {
+      return list;
+    }
+    if (sources.src) {
+      list.push({ url: normalizeUrl(sources.src), width: 0 });
+    }
+    if (Array.isArray(sources.srcSet)) {
+      for (const entry of sources.srcSet) {
+        if (!entry || !entry.url) {
+          continue;
+        }
+        const widthMatch = String(entry.descriptor || "").match(/(\d+)\s*w/i);
+        list.push({
+          url: normalizeUrl(entry.url),
+          width: widthMatch ? Number(widthMatch[1]) : 0,
+        });
+      }
+    }
+    return list;
+  }
+
+  function recordScreen(id, screenUrl, sources) {
+    if (!id) {
       return;
     }
-    lastMapRefresh = now;
 
+    let entry = screenEntries.get(id);
+    if (!entry) {
+      entry = { originalPath: null, signed: null, best: null };
+      screenEntries.set(id, entry);
+    }
+
+    const path = assetPathFromUrl(screenUrl);
+    if (path) {
+      entry.originalPath = path;
+    } else if (screenUrl) {
+      entry.signed = normalizeUrl(screenUrl);
+    }
+
+    const variants = widthsFromSources(sources);
+    let best = entry.best;
+    let bestWidth = -1;
+    for (const variant of variants) {
+      if (!variant.url) {
+        continue;
+      }
+      if (variant.width > bestWidth) {
+        bestWidth = variant.width;
+        best = variant.url;
+      }
+      if (!urlToScreenId.has(variant.url)) {
+        urlToScreenId.set(variant.url, id);
+      }
+    }
+    if (bestWidth > 0 && best) {
+      entry.best = best;
+    }
+
+    const own = screenUrl ? normalizeUrl(screenUrl) : null;
+    if (own && !urlToScreenId.has(own)) {
+      urlToScreenId.set(own, id);
+    }
+  }
+
+  /**
+   * The flight payload is one long escaped string. Each screen object keeps
+   * `id` and `screenUrl` far apart, so walking back to the closest `"id"`
+   * (instead of requiring adjacent keys) is what makes the map complete.
+   */
+  function scanPayload() {
     let text = "";
     try {
       text = Array.from(document.scripts, (script) => script.textContent || "").join("\n");
     } catch (error) {
-      return;
+      return false;
     }
 
-    for (const pattern of screenUrlPatterns) {
-      pattern.lastIndex = 0;
-      let match;
-      while ((match = pattern.exec(text)) !== null) {
-        if (!screenUrlMap.has(match[1])) {
-          screenUrlMap.set(match[1], match[2]);
+    const signature = document.scripts.length + ":" + text.length;
+    if (signature === lastPayloadSignature) {
+      return false;
+    }
+    lastPayloadSignature = signature;
+
+    const idPattern = new RegExp('\\\\?"id\\\\?":\\\\?"(' + UUID + ')\\\\?"', "g");
+    const ids = [];
+    let match;
+    while ((match = idPattern.exec(text)) !== null) {
+      ids.push({ id: match[1], at: match.index });
+    }
+    if (!ids.length) {
+      return false;
+    }
+
+    const before = screenEntries.size + urlToScreenId.size;
+    const urlPattern = /\\?"screenUrl\\?":\\?"(https:[^"\\]+)\\?"/g;
+    while ((match = urlPattern.exec(text)) !== null) {
+      const screenUrl = normalizeUrl(match[1]);
+      const at = match.index;
+
+      let owner = null;
+      for (let index = ids.length - 1; index >= 0; index -= 1) {
+        if (ids[index].at < at) {
+          owner = ids[index];
+          break;
+        }
+      }
+      // A screen object is a few KB; anything farther away is a different one.
+      if (!owner || at - owner.at > 12000) {
+        continue;
+      }
+
+      recordScreen(owner.id, screenUrl, sourcesBlockBefore(text, at, owner.at));
+    }
+
+    // Some routes (discover, flows) list screens with `id` + `screenCdnImgSources`
+    // but no `screenUrl`; index their signed renditions anyway.
+    const sourcesPattern = /screenCdnImgSources/g;
+    while ((match = sourcesPattern.exec(text)) !== null) {
+      const at = match.index;
+
+      let owner = null;
+      for (let index = ids.length - 1; index >= 0; index -= 1) {
+        if (ids[index].at < at) {
+          owner = ids[index];
+          break;
+        }
+      }
+      if (!owner || at - owner.at > 4000) {
+        continue;
+      }
+
+      const open = text.indexOf("{", at);
+      if (open === -1) {
+        continue;
+      }
+
+      let depth = 0;
+      let close = -1;
+      for (let index = open; index < text.length; index += 1) {
+        const char = text[index];
+        if (char === "{") {
+          depth += 1;
+        } else if (char === "}") {
+          depth -= 1;
+          if (depth === 0) {
+            close = index;
+            break;
+          }
+        }
+      }
+      if (close === -1) {
+        continue;
+      }
+
+      recordScreen(owner.id, null, parseJsonish(text.slice(open, close + 1)));
+    }
+
+    return screenEntries.size + urlToScreenId.size > before;
+  }
+
+  /** Parse the `screenCdnImgSources` object that precedes `at` in `text`. */
+  function sourcesBlockBefore(text, at, ownerAt) {
+    const keyAt = text.lastIndexOf("screenCdnImgSources", at);
+    if (keyAt === -1 || keyAt < ownerAt) {
+      return null;
+    }
+
+    const open = text.indexOf("{", keyAt);
+    if (open === -1 || open > at) {
+      return null;
+    }
+
+    let depth = 0;
+    for (let index = open; index < at; index += 1) {
+      const char = text[index];
+      if (char === "{") {
+        depth += 1;
+      } else if (char === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          return parseJsonish(text.slice(open, index + 1));
         }
       }
     }
+
+    return null;
   }
 
   function screenIdFromText(value) {
@@ -108,7 +326,7 @@
     const candidates = [];
     for (const part of srcset.split(",")) {
       const bits = part.trim().split(/\s+/);
-      const url = bits[0];
+      const url = normalizeUrl(bits[0]);
       if (!url || url.startsWith("data:")) {
         continue;
       }
@@ -134,9 +352,9 @@
 
   function toAbsoluteUrl(url) {
     try {
-      return new URL(url, window.location.href).href;
+      return new URL(normalizeUrl(url), window.location.href).href;
     } catch (error) {
-      return url;
+      return normalizeUrl(url);
     }
   }
 
@@ -196,27 +414,15 @@
     return bytescaleBase;
   }
 
-  function originalUrlFromScreenUrl(screenUrl) {
-    const marker = "/content/";
-    const index = screenUrl.indexOf(marker);
-    if (index === -1) {
-      return null;
-    }
-
+  /** `content/app_screens/<asset>.png` -> unsigned bytescale asset URL. */
+  function bytescaleUrlForAssetPath(path) {
     const base = detectBytescaleBase();
-    if (!base) {
-      return null;
-    }
-
-    // The `base` already points at `/image/mobbin.com/prod/`, so `content/`
-    // must be kept. Dropping it yields `/prod/app_screens/...`, which is a 502.
-    return base + screenUrl.slice(index + 1);
+    return base && path ? base + path : null;
   }
 
   /**
-   * Return the canonical unsigned asset URL for this image, if its current
-   * URL points at a Mobbin screenshot asset. Query params (`?w=15`, `enc=...`)
-   * are dropped on purpose: they only request a transformed derivative.
+   * Canonical unsigned asset URL when the image URL already carries it.
+   * Query params (`?w=15`, `enc=...`, `f=png`) only request a derivative.
    */
   function canonicalFromImageUrl(img) {
     const candidates = [];
@@ -257,7 +463,29 @@
     return null;
   }
 
-  function getScreenId(img) {
+  function imageUrls(img) {
+    const urls = [];
+    if (img.currentSrc) {
+      urls.push(normalizeUrl(img.currentSrc));
+    }
+    const src = img.getAttribute("src");
+    if (src) {
+      urls.push(normalizeUrl(src));
+    }
+    for (const candidate of parseSrcset(img.getAttribute("srcset"))) {
+      urls.push(candidate.url);
+    }
+    return urls;
+  }
+
+  function screenIdForImage(img) {
+    for (const url of imageUrls(img)) {
+      const id = urlToScreenId.get(url);
+      if (id) {
+        return id;
+      }
+    }
+
     const link = img.closest("a[href]");
     if (link) {
       const id = screenIdFromText(link.getAttribute("href"));
@@ -267,14 +495,85 @@
     }
 
     // Detail pages render the main screenshot outside any screen link. Reuse
-    // the page id, but only for images inside a screen frame so unrelated
-    // images (avatars, logos) are never replaced.
-    const inScreenFrame = img.closest(SCREEN_FRAME_SELECTOR);
-    if (inScreenFrame) {
+    // the page id, but only for images inside a screen frame.
+    if (img.closest(SCREEN_FRAME_SELECTOR)) {
       return screenIdFromText(window.location.pathname);
     }
 
     return null;
+  }
+
+  /**
+   * Signed renditions are a fallback for restricted screens, not a goal by
+   * themselves: only swap when the current pixels are clearly below 2x the
+   * rendered size, otherwise small cards would download huge images for nothing.
+   */
+  function shouldUseSignedRendition(img, url) {
+    const displayWidth = img.getBoundingClientRect().width;
+    if (!displayWidth) {
+      return false;
+    }
+    if (url === (img.currentSrc || img.getAttribute("src"))) {
+      return false;
+    }
+    return (img.naturalWidth || 0) < Math.max(displayWidth * 2, 320);
+  }
+
+  /**
+   * Mobbin sometimes sets the full-size URL while the element keeps a small
+   * bitmap loaded earlier (the attribute already has the right URL, so it does
+   * not reload). Re-assigning the very same `src` is a no-op, so drop the
+   * attribute first. Done at most once per URL and element.
+   */
+  function forceReload(img, url) {
+    let seen = reloadedUrls.get(img);
+    if (!seen) {
+      seen = new Set();
+      reloadedUrls.set(img, seen);
+    }
+    if (seen.has(url)) {
+      return false;
+    }
+    seen.add(url);
+
+    img.removeAttribute("src");
+    if (img.hasAttribute("srcset")) {
+      img.removeAttribute("srcset");
+    }
+    img.setAttribute("src", url);
+    return true;
+  }
+
+  function needsReload(img) {
+    const displayWidth = img.getBoundingClientRect().width;
+    if (!displayWidth || !img.complete) {
+      return false;
+    }
+
+    const current = img.getAttribute("src");
+    if (!current) {
+      return false;
+    }
+
+    // Only for URLs we know belong to a screen; other images (logos, avatars)
+    // can legitimately be small.
+    const id = urlToScreenId.get(current);
+    const entry = id ? screenEntries.get(id) : null;
+    if (!entry) {
+      return false;
+    }
+
+    const naturalWidth = img.naturalWidth || 0;
+    return naturalWidth > 0 && naturalWidth < displayWidth * 1.1;
+  }
+
+  function isScreenImage(img) {
+    if (img.closest(SCREEN_FRAME_SELECTOR) || img.closest(SCREEN_ANCHOR_SELECTOR)) {
+      return true;
+    }
+
+    const className = typeof img.className === "string" ? img.className : "";
+    return /object-top/.test(className) && /object-cover/.test(className);
   }
 
   function hasFailed(img, url) {
@@ -333,10 +632,22 @@
       return false;
     }
 
-    const onError = () => {
+    const markUpgraded = () => {
+      img.dataset.unblur = VERSION;
+    };
+
+    const onLoad = () => {
       img.removeEventListener("error", onError);
+      markUpgraded();
+    };
+
+    const onError = () => {
+      img.removeEventListener("load", onLoad);
       markFailed(img, originalUrl);
       appliedUrl.delete(img);
+      if (img.dataset.unblur) {
+        delete img.dataset.unblur;
+      }
 
       // Another run may have swapped the image in the meantime; only restore
       // when the failed URL is still the one in use.
@@ -344,8 +655,6 @@
         return;
       }
 
-      // The original path can be stale for some screens. Put the previous
-      // image back when that happens instead of leaving a broken thumbnail.
       if (previousSrc === null) {
         img.removeAttribute("src");
       } else {
@@ -359,56 +668,60 @@
       }
     };
 
+    img.addEventListener("load", onLoad, { once: true });
     img.addEventListener("error", onError, { once: true });
+
+    if (img.complete && img.naturalWidth > 0) {
+      img.removeEventListener("error", onError);
+      markUpgraded();
+    }
+
     return true;
   }
 
-  function screenUrlFromSignedUrl(img) {
-    if (!signedUrlToScreenUrl.size) {
-      return null;
-    }
-
-    const urls = [];
-    if (img.currentSrc) {
-      urls.push(img.currentSrc);
-    }
-    if (img.getAttribute("src")) {
-      urls.push(img.getAttribute("src"));
-    }
-    for (const candidate of parseSrcset(img.getAttribute("srcset"))) {
-      urls.push(candidate.url);
-    }
-
-    for (const raw of urls) {
-      const match = signedUrlToScreenUrl.get(raw);
-      if (match) {
-        return match;
-      }
-    }
-
-    return null;
-  }
-
   function upgradeImage(img) {
-    if (!visibleImages.get(img)) {
+    if (!isScreenImage(img)) {
       return;
     }
 
-    // 1. The canonical path is already in the URL: drop the transform query.
-    //    This is the only strategy that works on app detail pages, where the
-    //    payload is fetched client-side and never appears in `document.scripts`.
+    // 1. The canonical asset path is already in the URL: drop the query.
+    const current = img.getAttribute("src") || "";
     const canonicalUrl = canonicalFromImageUrl(img);
-    if (applyOriginalFallback(img, canonicalUrl)) {
+    if (canonicalUrl === current) {
+      if (img.complete && img.naturalWidth > 0) {
+        img.dataset.unblur = VERSION;
+      }
+    } else if (applyOriginalFallback(img, canonicalUrl)) {
       return;
     }
 
-    // 2. Page payload (explore/flow pages) or the app screens API.
-    const screenId = getScreenId(img);
-    const payloadUrl = screenId ? screenUrlMap.get(screenId) : null;
-    const matchedUrl = payloadUrl || screenUrlFromSignedUrl(img);
-    const originalUrl = matchedUrl ? originalUrlFromScreenUrl(matchedUrl) : null;
-    if (applyOriginalFallback(img, originalUrl)) {
-      return;
+    // 2. Signed thumbnail URL / screen link -> screen entry.
+    const id = screenIdForImage(img);
+    const entry = id ? screenEntries.get(id) : null;
+
+    if (entry) {
+      const originalUrl = entry.originalPath
+        ? bytescaleUrlForAssetPath(entry.originalPath)
+        : null;
+      const targetUrl = originalUrl || entry.best || entry.signed || null;
+
+      if (targetUrl && !hasFailed(img, targetUrl)) {
+        if (targetUrl === current) {
+          // The URL is already right; a smaller bitmap means the element kept
+          // a stale load and has to be refreshed.
+          if (needsReload(img)) {
+            if (forceReload(img, targetUrl)) {
+              return;
+            }
+          } else if (img.complete && img.naturalWidth > 0) {
+            img.dataset.unblur = VERSION;
+          }
+        } else if (originalUrl || shouldUseSignedRendition(img, targetUrl)) {
+          if (applyOriginalFallback(img, targetUrl)) {
+            return;
+          }
+        }
+      }
     }
 
     // 3. A previous run may already have removed `srcset`. Re-apply the URL we
@@ -419,23 +732,36 @@
     }
   }
 
+  /**
+   * The observer is only an optimisation: some layouts (and lazy lists) never
+   * report intersection before the first paint, so fall back to a direct
+   * viewport test. Otherwise a visible card can stay blurred forever.
+   */
+  function isNearViewport(img) {
+    const rect = img.getBoundingClientRect();
+    if (!rect.width && !rect.height) {
+      return false;
+    }
+    return rect.bottom > -1500 && rect.top < window.innerHeight + 1500;
+  }
+
   function observeImage(img) {
+    if (!isScreenImage(img)) {
+      return;
+    }
+
     if (!visibleImages.has(img)) {
       visibleImages.set(img, false);
       intersectionObserver.observe(img);
     }
 
-    if (visibleImages.get(img)) {
+    if (visibleImages.get(img) || isNearViewport(img)) {
       upgradeImage(img);
     }
   }
 
   function isScreenRelated(element) {
-    if (
-      element.matches(
-        'a[href*="/screens/"], a[href*="/explore/flows/"], a[href*="/explore/screens/"]'
-      )
-    ) {
+    if (element.matches(SCREEN_ANCHOR_SELECTOR)) {
       return true;
     }
 
@@ -469,11 +795,7 @@
       }
 
       // Never hide a wrapper that contains the screenshot itself.
-      if (
-        element.querySelector(
-          'img[data-sentry-component="CdnImg"], img[data-sentry-source-file="ScreenCellImage.tsx"]'
-        )
-      ) {
+      if (element.querySelector("img")) {
         return;
       }
 
@@ -486,9 +808,12 @@
         return;
       }
 
-      const inScreen = Boolean(element.closest(SCREEN_FRAME_SELECTOR));
+      const inScreen = Boolean(
+        element.closest(SCREEN_FRAME_SELECTOR) ||
+          element.closest(SCREEN_ANCHOR_SELECTOR)
+      );
       // The exact veil Mobbin renders on locked cells:
-      // `<div class="absolute inset-0 bg-[hsl(var(--neutral-0)/40%)] backdrop-blur-[10px]">`.
+      // <div class="absolute inset-0 bg-[hsl(var(--neutral-0)/40%)] backdrop-blur-[10px]">
       const isKnownPaywallVeil =
         /backdrop-blur-\[(?:6|8|10|12|16)px\]/.test(className) ||
         /hsl\(var\(--neutral-0\)\/40%\)/.test(className);
@@ -519,24 +844,7 @@
     }
 
     if (typeof value.id === "string" && typeof value.screenUrl === "string") {
-      if (!screenUrlMap.has(value.id)) {
-        screenUrlMap.set(value.id, value.screenUrl);
-      }
-
-      const sources = value.screenCdnImgSources;
-      if (sources) {
-        const urls = [sources.src];
-        if (Array.isArray(sources.srcSet)) {
-          for (const entry of sources.srcSet) {
-            urls.push(entry && entry.url);
-          }
-        }
-        for (const url of urls) {
-          if (typeof url === "string" && !signedUrlToScreenUrl.has(url)) {
-            signedUrlToScreenUrl.set(url, value.screenUrl);
-          }
-        }
-      }
+      recordScreen(value.id, value.screenUrl, value.screenCdnImgSources || null);
     }
 
     if (Array.isArray(value)) {
@@ -552,9 +860,10 @@
   }
 
   /**
-   * On `/apps/<slug>/<appId>/<versionId>/screens`, the screens payload is
-   * fetched client-side. Ask Mobbin's own endpoint for it so `screenUrl` (and
-   * the signed variants) are available for the canonical fallback.
+   * On `/apps/<slug>/<appId>/<version>/screens` the list is paginated; this
+   * endpoint returns every screen with its original `screenUrl`, restricted
+   * ones included. The URL is absolute on purpose: a relative URL inside an
+   * isolated content-script world can resolve against the extension origin.
    */
   function enrichFromAppApi() {
     if (appScreensRequested) {
@@ -566,14 +875,17 @@
       return;
     }
 
-    const idMatch = segments[1].match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+    const idMatch = segments[1].match(
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    );
     if (!idMatch) {
       return;
     }
 
     appScreensRequested = true;
+    appScreensAttempts += 1;
 
-    fetch("/api/app/fetch-app-versions-screens", {
+    fetch(window.location.origin + "/api/app/fetch-app-versions-screens", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ appId: idMatch[0] }),
@@ -582,45 +894,93 @@
       .then((response) => (response.ok ? response.json() : null))
       .then((json) => {
         if (!json) {
-          return;
+          throw new Error("empty response");
         }
         collectScreenObjects(json, 0);
         schedule();
       })
       .catch(() => {
-        // Not fatal: the canonical URL rewrite does not need the API.
+        // The payload scan already covers the first page; retry once in case
+        // the endpoint was momentarily unavailable.
+        if (appScreensAttempts < 2) {
+          appScreensRequested = false;
+          window.setTimeout(enrichFromAppApi, 3000);
+        }
       });
   }
 
+  function countUpgraded() {
+    return document.querySelectorAll("img[data-unblur]").length;
+  }
+
+  function screenImages() {
+    return Array.from(document.querySelectorAll(SCREEN_IMAGE_SELECTOR)).filter(
+      isScreenImage
+    );
+  }
+
   function logDiagnostics() {
-    const images = Array.from(document.querySelectorAll(SCREEN_IMAGE_SELECTOR));
-    const screenImages = images.filter((img) => img.closest(SCREEN_FRAME_SELECTOR));
-    const report = screenImages.slice(0, 6).map((img) => {
+    const images = screenImages();
+    const report = images.slice(0, 6).map((img) => {
       const frame = img.closest(SCREEN_FRAME_SELECTOR);
-      const rect = img.getBoundingClientRect();
+      const url = img.currentSrc || img.getAttribute("src") || "";
       return {
-        src: (img.currentSrc || img.getAttribute("src") || "").slice(-70),
-        srcset: img.hasAttribute("srcset"),
-        shown: Math.round(rect.width) + "x" + Math.round(rect.height),
-        veil: Boolean(frame && frame.querySelector('[class*="backdrop-blur"]')),
-        frame: frame ? frame.className.slice(0, 80) : null,
+        src: url.slice(-58),
+        kind: assetPathFromUrl(url) ? "original" : url.includes("enc=") ? "signed" : "other",
+        upgraded: Boolean(img.dataset.unblur),
+        veil: Boolean(
+          frame &&
+            frame.querySelector('[class*="backdrop-blur"],[style*="backdrop-filter"]')
+        ),
       };
     });
 
     console.info("[Unblur Mobbin] diagnóstico", {
       version: VERSION,
       path: window.location.pathname,
-      screenImages: screenImages.length,
-      canonical: screenImages.length ? canonicalFromImageUrl(screenImages[0]) : null,
-      payloadScreens: screenUrlMap.size,
-      apiScreens: signedUrlToScreenUrl.size,
+      screenImages: images.length,
+      upgraded: countUpgraded(),
+      screens: screenEntries.size,
+      urlIndex: urlToScreenId.size,
+      apiRequests: appScreensAttempts,
       sample: report,
     });
   }
 
+  function showToast() {
+    const badge = document.createElement("div");
+    badge.id = "unblur-mobbin-badge";
+    badge.textContent = "Unblur Mobbin v" + VERSION + " activo";
+    badge.style.cssText = [
+      "position:fixed",
+      "right:16px",
+      "bottom:16px",
+      "z-index:2147483647",
+      "padding:8px 12px",
+      "border-radius:999px",
+      "background:#16a34a",
+      "color:#fff",
+      "font:600 12px/1.2 system-ui,sans-serif",
+      "box-shadow:0 6px 20px rgba(0,0,0,.25)",
+      "pointer-events:none",
+      "transition:opacity .4s ease",
+    ].join(";");
+    document.body.appendChild(badge);
+
+    window.setTimeout(() => {
+      badge.textContent =
+        "Unblur Mobbin v" + VERSION + " · " + countUpgraded() + " capturas nítidas";
+    }, 4000);
+
+    window.setTimeout(() => {
+      badge.style.opacity = "0";
+      window.setTimeout(() => badge.remove(), 500);
+    }, 8000);
+  }
+
   function handleModifications() {
     try {
-      refreshScreenUrlMap(false);
+      scanPayload();
     } catch (error) {
       console.error("Unblur Mobbin (payload):", error);
     }
@@ -645,6 +1005,20 @@
     }
   }
 
+  function handleRouteChange() {
+    if (window.location.pathname === lastPathname) {
+      return;
+    }
+
+    lastPathname = window.location.pathname;
+    appScreensRequested = false;
+    appScreensAttempts = 0;
+    lastPayloadSignature = null;
+    scanPayload();
+    enrichFromAppApi();
+    schedule();
+  }
+
   const intersectionObserver = new IntersectionObserver(
     (entries) => {
       let shouldSchedule = false;
@@ -660,7 +1034,7 @@
         schedule();
       }
     },
-    { rootMargin: "1200px 0px" }
+    { rootMargin: "1500px 0px" }
   );
 
   const mutationObserver = new MutationObserver((mutations) => {
@@ -698,9 +1072,19 @@
       "color:#22c55e;font-weight:bold"
     );
 
-    refreshScreenUrlMap(true);
+    scanPayload();
     handleModifications();
     enrichFromAppApi();
+    showToast();
+
+    // Debug handle: useful to inspect the maps from the page console.
+    window.__unblurMobbin = {
+      version: VERSION,
+      screenEntries,
+      urlToScreenId,
+      scan: scanPayload,
+      sweep: handleModifications,
+    };
 
     mutationObserver.observe(document.documentElement, {
       childList: true,
@@ -712,16 +1096,30 @@
     window.addEventListener("scroll", schedule, { passive: true, capture: true });
     window.addEventListener("resize", schedule, { passive: true });
     window.addEventListener("popstate", schedule);
+    window.addEventListener("load", schedule);
 
-    // The Next.js payload can still be streaming when this script starts, so
-    // refresh the original-screen map once more after hydration settles.
-    window.setTimeout(() => {
-      refreshScreenUrlMap(true);
+    // Fast sweeps while the page hydrates and streams more screens, then a slow
+    // periodic sweep for client-side navigation and lazy sections.
+    let fastTicks = 0;
+    const fastSweep = () => {
+      fastTicks += 1;
+      handleRouteChange();
+      scanPayload();
       schedule();
-    }, 2500);
+      if (fastTicks < 15) {
+        window.setTimeout(fastSweep, 2000);
+      }
+    };
+    window.setTimeout(fastSweep, 2000);
+
+    window.setInterval(() => {
+      handleRouteChange();
+      if (scanPayload()) {
+        schedule();
+      }
+    }, 10000);
 
     window.setTimeout(logDiagnostics, DIAGNOSTICS_DELAY);
-
     schedule();
   }
 

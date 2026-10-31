@@ -1,98 +1,76 @@
-# Mobbin Scene Unblur Extension
+# Unblur Mobbin
 
-This browser extension removes the blur/veil on Mobbin.com screen previews and restores them to their full resolution.
+A browser extension that removes the blur on Mobbin.com screen previews and restores the **original full-resolution screenshots**, including on app detail pages where most screens are "locked" behind the paywall.
 
-## Features
+## What it fixes (v1.4)
 
-- **Full-resolution screens**: Mobbin's image URL contains the canonical unsigned asset (`.../content/app_screens/<asset>.png`). Some pages render it with a downscale query (`?w=15`); the extension strips the query and pins the image to the native capture (e.g. 1179×2556) on every route.
-- **Paywall cleanup**: Hides the `backdrop-blur` veil layers (the exact `bg-[hsl(var(--neutral-0)/40%)] backdrop-blur-[10px]` overlay used on locked cells), removes wrapper blur filters and re-enables pointer events.
-- **Works on app detail pages too**: The asset path is resolved directly from the image URL, so it does not depend on the page payload being present in the HTML. When a signed URL is used instead, the extension also reads Mobbin's payload and app screens API.
-- **Lazy processing**: Images are upgraded with an `IntersectionObserver` (about 1200px around the viewport) so the extension does not download every full-resolution screen at once.
+- **Locked / restricted screens**: Mobbin serves most app-detail cells as a signed placeholder (`.../prod/file.webp?enc=...`, about 286 px wide) plus a `backdrop-blur-[10px]` veil. The extension resolves the real asset for those cells and loads the native capture (e.g. 1179x2556) instead of the placeholder.
+- **All routes**: works on app detail (`/apps/.../screens` and `/flows`), screen pages (`/screens/...`), explore and discover lists, including the small preview carousels inside app cards.
+- **Paywall veil**: hides the `bg-[hsl(var(--neutral-0)/40%)] backdrop-blur-[10px]` overlay, clears wrapper `filter`/`backdrop-filter` and re-enables pointer events.
+- **No broken images**: if a replacement fails, the previous image is restored.
+- **Visible confirmation**: a green badge appears bottom-right for a few seconds — `Unblur Mobbin v1.4.0 · N capturas nítidas`.
 
 ## Install without building (recommended)
 
 Download the packaged extension from the latest release:
 
-**[UNBLUR-MOBBIN-v1.3-INSTALAR.zip](https://github.com/nicosanchezc1-oss/unblur-mobbin/releases/download/v1.3/UNBLUR-MOBBIN-v1.3-INSTALAR.zip)**
+**[UNBLUR-MOBBIN-v1.4-INSTALAR.zip](https://github.com/nicosanchezc1-oss/unblur-mobbin/releases/download/v1.4/UNBLUR-MOBBIN-v1.4-INSTALAR.zip)**
 
-Release page: <https://github.com/nicosanchezc1-oss/unblur-mobbin/releases/tag/v1.3>
+Release page: <https://github.com/nicosanchezc1-oss/unblur-mobbin/releases/tag/v1.4>
 
 > Do **not** use GitHub's "Source code (zip)" archive: it only contains the source and has no built extension.
 
 1. Unzip the download.
 2. Open `chrome://extensions/` (Edge: `edge://extensions/`, Brave: `brave://extensions/`).
 3. Enable **Developer mode**.
-4. Click **Load unpacked** and select the `unblur-mobbin-v1.3` folder (the one containing `manifest.json`).
-5. Remove any older copy of this extension (and any other "Mobbin Cracker" extension) so two scripts do not fight over the same images.
+4. **Remove any older copy** of this extension, and disable/remove other Mobbin extensions (e.g. "Mobbin Cracker") so two scripts do not fight over the same images.
+5. Click **Load unpacked** and select the `unblur-mobbin-v1.4` folder (the one containing `manifest.json`).
 6. Open Mobbin and reload the page.
-7. Optional check: open DevTools (F12) and look for `[Unblur Mobbin] v1.3.0 activo` in the Console.
 
-If you still see blur, scroll the page: screens are upgraded when they get near the viewport. If a specific page still fails, the console prints an `[Unblur Mobbin] diagnóstico` object with the image URL, decoded size and whether a blur veil was found.
+Optional check: open DevTools (F12). The console prints `[Unblur Mobbin] v1.4.0 activo` and, after a few seconds, an `[Unblur Mobbin] diagnóstico` object with the number of mapped screens, upgraded images and any remaining veil.
 
-## Build from source
+If a screenshot still looks soft:
 
-1. **Clone the Repository**
-
-   \`\`\`sh
-   gh repo clone nicosanchezc1-oss/unblur-mobbin
-   cd unblur-mobbin
-   \`\`\`
-
-2. **Install Dependencies**
-
-   This project uses Vite for bundling. Install dependencies with:
-
-   \`\`\`sh
-   npm install
-   \`\`\`
-
-   or
-
-   \`\`\`sh
-   yarn install
-   \`\`\`
-
-3. **Build the Extension**
-
-   To build the extension for your browser, run:
-
-   \`\`\`sh
-   npm run build
-   \`\`\`
-
-   or
-
-   \`\`\`sh
-   yarn build
-   \`\`\`
-
-4. **Load the Extension**
-
-   - Open your browser and navigate to the Extensions page (e.g., \`chrome://extensions/\` for Chrome).
-   - Enable "Developer mode".
-   - Click "Load unpacked" and select the \`dist\` directory created by the build process.
-
-## Usage
-
-Once installed, the extension works automatically on Mobbin.com. Open Mobbin and the screens you see will load at full resolution, without the blur veil or the locked pointer events.
+- Scroll it into view; screens are upgraded when they get near the viewport.
+- Check that the green badge appeared. If it did not, the extension is not loaded (or another folder was loaded).
+- Copy the `diagnóstico` object from the console: it lists the remaining image URLs, their decoded size and whether a blur veil is still present.
 
 ## How it works
 
-Mobbin serves each screenshot through a `CdnImg` component. The rendered URL either points to the canonical unsigned asset (`/content/app_screens/<asset>.png`) or to a transformed derivative (`?w=15`, `enc=...`). For every screen image near the viewport, `content.js`:
+Mobbin renders every screenshot through a `CdnImg` component and hides the real asset in one of three ways:
 
-1. Derives the canonical asset URL from the image itself and drops the transform query.
-2. Falls back to the screen's `screenUrl` from the page payload (and, on app pages, from `/api/app/fetch-app-versions-screens`), then to the largest `srcset` candidate.
-3. Removes `srcset`/`sizes` and restores the previous image if the canonical URL fails.
-4. Removes `pointer-events-none` and hides the paywall `backdrop-blur` veil layers on every route.
+1. `...content/app_screens/<asset>.png?w=15` — a downscaled transform of the real asset.
+2. `.../prod/file.webp?enc=...` — a signed placeholder that does not contain the asset id at all, plus a `backdrop-blur` veil.
+3. A wrapper with `filter: blur(...)`.
 
-The logic is split across `public/content.js` and `public/content.css`.
+`content.js` recovers the original asset from the Next.js flight payload and from Mobbin's own `POST /api/app/fetch-app-versions-screens`, which returns `screenUrl` (`content/app_screens/<asset>.png`) for every screen of the app, restricted ones included. The asset is then requested from bytescale **without** a transform query (`.../prod/content/app_screens/<asset>.png`), which serves the native capture (1179x2556, 1125x2436, ...).
+
+Per image, in order:
+
+1. Canonical asset path already in the URL -> drop the query.
+2. Signed thumbnail URL or screen id -> original asset from the payload/API map.
+3. Largest signed rendition (`1920w`) as a fallback while the API answers.
+4. Largest `srcset` candidate.
+
+Images are processed near the viewport (IntersectionObserver plus a direct viewport check, because some lazy lists never report intersection), and the same `src` is force-reloaded once when the element keeps a stale low-resolution bitmap.
+
+The logic lives in `public/content.js` and `public/content.css`.
+
+## Build from source
+
+```sh
+gh repo clone nicosanchezc1-oss/unblur-mobbin
+cd unblur-mobbin
+npm install
+npm run build
+```
+
+Then open `chrome://extensions/`, enable **Developer mode**, click **Load unpacked** and select the generated `dist` folder.
 
 ## Contributing
 
-If you’d like to contribute to this project, please follow these steps:
-
 1. Fork the repository.
-2. Create a feature branch (\`git checkout -b feature/YourFeature\`).
-3. Commit your changes (\`git commit -am 'Add new feature'\`).
-4. Push to the branch (\`git push origin feature/YourFeature\`).
-5. Create a Pull Request.
+2. Create a feature branch (`git checkout -b feature/YourFeature`).
+3. Commit your changes (`git commit -am 'Add new feature'`).
+4. Push to the branch (`git push origin feature/YourFeature`).
+5. Open a Pull Request.

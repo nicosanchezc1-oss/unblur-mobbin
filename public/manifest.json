@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Unblur Mobbin",
-  "version": "1.3",
+  "version": "1.4",
   "description": "Unblur and restore full-resolution screens on Mobbin",
   "permissions": ["activeTab", "scripting"],
   "host_permissions": ["https://mobbin.com/*"],
